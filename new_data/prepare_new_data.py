@@ -14,19 +14,27 @@ INSTRUCTION = (
 
 def _read_user_rows(path: Path) -> List[Tuple[int, List[int], List[int]]]:
     rows: List[Tuple[int, List[int], List[int]]] = []
+    malformed_rows = 0
+    short_pos_rows = 0
     with path.open("r", encoding="utf-8") as f:
         reader = csv.reader(f, delimiter="\t")
         for line_id, row in enumerate(reader, start=1):
             if len(row) != 3:
                 print(f"[WARN] skip malformed row at {path}:{line_id}: {row}")
+                malformed_rows += 1
                 continue
             user_id = int(row[0])
             pos = [int(x) for x in row[1].split(",") if x != ""]
             neg = [int(x) for x in row[2].split(",") if x != ""]
             if len(pos) < 2:
                 print(f"[WARN] skip user {user_id} because pos length < 2")
+                short_pos_rows += 1
                 continue
             rows.append((user_id, pos, neg))
+    print(
+        f"[Load Summary] {path.name}: kept_users={len(rows)}, "
+        f"malformed_rows={malformed_rows}, short_pos_rows={short_pos_rows}"
+    )
     return rows
 
 
@@ -107,6 +115,10 @@ def main() -> None:
     split = int(len(train_rows) * (1 - args.val_ratio))
     train_split = train_rows[:split]
     valid_split = train_rows[split:]
+    print(
+        f"[Split Summary] train_users={len(train_split)}, valid_users={len(valid_split)}, "
+        f"val_ratio={args.val_ratio}"
+    )
 
     def build_train_examples(rows: List[Tuple[int, List[int], List[int]]]) -> List[dict]:
         examples: List[dict] = []
@@ -140,6 +152,13 @@ def main() -> None:
     print("[Step 5/6] Converting train/valid examples")
     train_examples = build_train_examples(train_split)
     valid_examples = build_train_examples(valid_split)
+    print(
+        f"[Example Summary] train_examples={len(train_examples)}, valid_examples={len(valid_examples)}"
+    )
+    if len(train_examples) == 0:
+        print(
+            "[WARN] train_examples is 0. Please check train/test source files and --val-ratio."
+        )
 
     test_records = []
     print("[Step 6/6] Building ranking test records")

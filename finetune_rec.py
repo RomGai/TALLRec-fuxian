@@ -1,5 +1,6 @@
 import os
 import sys
+import inspect
 from typing import List
 
 import numpy as np 
@@ -242,6 +243,21 @@ def train(
         val_data = load_dataset("json", data_files=val_data_path)
     else:
         val_data = load_dataset(val_data_path)
+    train_count = len(train_data["train"])
+    val_count = len(val_data["train"])
+    print(f"[Data Check] train examples={train_count}, valid examples={val_count}")
+    if train_count == 0:
+        raise ValueError(
+            "Loaded 0 training examples. Please check: "
+            "(1) train_data_path points to prepared_data/<dataset>/train.json; "
+            "(2) the file is not empty; "
+            "(3) prepare_new_data.py was run with a non-extreme --val-ratio."
+        )
+    if val_count == 0:
+        print(
+            "[Warning] Validation set has 0 examples. "
+            "Consider lowering --val-ratio in prepare_new_data.py."
+        )
 
     
     # train_data = train_data.shuffle(seed=42)[:sample] if sample > -1 else train_data
@@ -314,34 +330,41 @@ def train(
             print(f"[Eval] step={state.global_step} metrics={metrics}")
     
     print("[Step 7/8] Building Trainer")
+    training_args_kwargs = dict(
+        per_device_train_batch_size=micro_batch_size,
+        gradient_accumulation_steps=gradient_accumulation_steps,
+        warmup_steps=20,
+        num_train_epochs=num_epochs,
+        learning_rate=learning_rate,
+        fp16=True,
+        logging_steps=logging_steps,
+        optim="adamw_torch",
+        save_strategy="steps",
+        eval_steps=eval_step,
+        save_steps=eval_step,
+        output_dir=output_dir,
+        save_total_limit=1,
+        load_best_model_at_end=True,
+        metric_for_best_model="eval_auc",
+        ddp_find_unused_parameters=False if ddp else None,
+        group_by_length=group_by_length,
+        report_to=None,
+    )
+    ta_sig = inspect.signature(transformers.TrainingArguments.__init__)
+    if "evaluation_strategy" in ta_sig.parameters:
+        training_args_kwargs["evaluation_strategy"] = "steps"
+    elif "eval_strategy" in ta_sig.parameters:
+        training_args_kwargs["eval_strategy"] = "steps"
+    else:
+        raise RuntimeError(
+            "Neither 'evaluation_strategy' nor 'eval_strategy' is supported by this transformers version."
+        )
+
     trainer = transformers.Trainer(
         model=model,
         train_dataset=train_data,
         eval_dataset=val_data,
-        args=transformers.TrainingArguments(
-            per_device_train_batch_size=micro_batch_size,
-            gradient_accumulation_steps=gradient_accumulation_steps,
-            warmup_steps=20,
-            num_train_epochs=num_epochs,
-            learning_rate=learning_rate,
-            fp16=True,
-            logging_steps=logging_steps,
-            optim="adamw_torch",
-            evaluation_strategy="steps",
-            save_strategy="steps",
-            eval_steps=eval_step,
-            save_steps=eval_step,
-            output_dir=output_dir,
-            save_total_limit=1,
-            load_best_model_at_end=True,
-            metric_for_best_model="eval_auc",
-            ddp_find_unused_parameters=False if ddp else None,
-            group_by_length=group_by_length,
-            report_to=None,
-            # report_to="wandb" if use_wandb else None,
-            # run_name=wandb_run_name if use_wandb else None,
-            # eval_accumulation_steps=10,
-        ),
+        args=transformers.TrainingArguments(**training_args_kwargs),
         data_collator=transformers.DataCollatorForSeq2Seq(
             tokenizer, pad_to_multiple_of=8, return_tensors="pt", padding=True
         ),
