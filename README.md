@@ -68,7 +68,7 @@ This command will:
 ### 2) Train (backbone from Hugging Face directly)
 ```bash
 python finetune_rec.py \
-  --base_model meta-llama/Llama-2-7b-hf \
+  --base_model Qwen/Qwen2-7B-Instruct \
   --train_data_path prepared_data/Baby_Products/train.json \
   --val_data_path prepared_data/Baby_Products/valid.json \
   --output_dir outputs/baby_lora \
@@ -77,17 +77,19 @@ python finetune_rec.py \
   --num_epochs 3 \
   --learning_rate 1e-4 \
   --logging_steps 1 \
-  --load_in_8bit True
+  --load_in_8bit True \
+  --prompt_style auto
 ```
 
 ### 3) Evaluate ranking with `1 target + 1000 random negatives`
 ```bash
 python new_data/evaluate_ranking.py \
-  --base-model meta-llama/Llama-2-7b-hf \
+  --base-model Qwen/Qwen2-7B-Instruct \
   --lora-weights outputs/baby_lora \
   --prepared-dir prepared_data/Baby_Products \
   --neg-sample-size 1000 \
   --batch-size 32 \
+  --prompt-style auto \
   --output outputs/baby_ranking_metrics.json
 ```
 
@@ -96,3 +98,5 @@ The evaluator reports:
 - NDCG@10 / NDCG@20 / NDCG@40
 - target rank per user
 - running average metrics after each processed user
+
+`finetune_rec.py` and `new_data/evaluate_ranking.py` now share the same `AutoModelForCausalLM`/`AutoTokenizer` loading path and can both run with Qwen2-Instruct. When chat template exists (e.g., Qwen), `--prompt_style auto` will use chat formatting automatically.

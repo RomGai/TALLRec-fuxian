@@ -58,6 +58,7 @@ def train(
     resume_from_checkpoint: str = None,  # either training checkpoint or final adapter
     load_in_8bit: bool = True,
     logging_steps: int = 1,
+    prompt_style: str = "auto",  # auto | plain | chat
 
 ):
     print(
@@ -86,6 +87,7 @@ def train(
         f"resume_from_checkpoint: {resume_from_checkpoint}\n"
         f"load_in_8bit: {load_in_8bit}\n"
         f"logging_steps: {logging_steps}\n"
+        f"prompt_style: {prompt_style}\n"
     )
     assert (
         base_model
@@ -121,7 +123,8 @@ def train(
 
     tokenizer = AutoTokenizer.from_pretrained(base_model, use_fast=True)
 
-    tokenizer.pad_token_id = 0 if tokenizer.pad_token_id is None else tokenizer.pad_token_id
+    if tokenizer.pad_token_id is None:
+        tokenizer.pad_token = tokenizer.eos_token
     tokenizer.padding_side = "left"  # Allow batched inference
     yes_token_ids = tokenizer.encode(" Yes", add_special_tokens=False)
     no_token_ids = tokenizer.encode(" No", add_special_tokens=False)
@@ -130,6 +133,28 @@ def train(
     yes_token_id = yes_token_ids[0]
     no_token_id = no_token_ids[0]
     print(f"[Token IDs] yes_token_id={yes_token_id}, no_token_id={no_token_id}")
+
+    use_chat_template = (
+        (prompt_style == "chat")
+        or (prompt_style == "auto" and getattr(tokenizer, "chat_template", None))
+    )
+    print(f"[Prompt Style] use_chat_template={bool(use_chat_template)}")
+
+    def build_prompt(data_point, with_output=True):
+        if use_chat_template:
+            user_text = f"{data_point['instruction']}\n\n{data_point['input']}".strip()
+            messages = [
+                {"role": "system", "content": "You are a helpful recommender assistant."},
+                {"role": "user", "content": user_text},
+            ]
+            if with_output:
+                messages.append({"role": "assistant", "content": data_point["output"]})
+            return tokenizer.apply_chat_template(
+                messages,
+                tokenize=False,
+                add_generation_prompt=not with_output,
+            )
+        return generate_prompt(data_point if with_output else {**data_point, "output": ""})
 
     def tokenize(prompt, add_eos_token=True):
         # there's probably a way to do this with the tokenizer settings
@@ -154,10 +179,10 @@ def train(
         return result
 
     def generate_and_tokenize_prompt(data_point):
-        full_prompt = generate_prompt(data_point)
+        full_prompt = build_prompt(data_point, with_output=True)
         tokenized_full_prompt = tokenize(full_prompt)
         if not train_on_inputs:
-            user_prompt = generate_prompt({**data_point, "output": ""})
+            user_prompt = build_prompt(data_point, with_output=False)
             tokenized_user_prompt = tokenize(user_prompt, add_eos_token=False)
             user_prompt_len = len(tokenized_user_prompt["input_ids"])
 

@@ -16,7 +16,7 @@ INSTRUCTION = (
 )
 
 
-def _build_prompt(history: List[int], target: int, item_text: Dict[str, str], max_history: int) -> str:
+def _build_prompt_plain(history: List[int], target: int, item_text: Dict[str, str], max_history: int) -> str:
     hist = history[-max_history:]
     hist_text = ", ".join(f'"{item_text.get(str(i), f"Item_{i}")}"' for i in hist)
     target_text = f'"{item_text.get(str(target), f"Item_{target}")}"'
@@ -47,6 +47,7 @@ def main() -> None:
     parser.add_argument("--max-history", type=int, default=20)
     parser.add_argument("--output", default="ranking_metrics.json")
     parser.add_argument("--max-users", type=int, default=-1, help="Only evaluate first N users when > 0")
+    parser.add_argument("--prompt-style", default="auto", choices=["auto", "plain", "chat"])
     args = parser.parse_args()
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -64,6 +65,11 @@ def main() -> None:
         print(f"[Step 1.1] Loading LoRA weights from {args.lora_weights}")
         model = PeftModel.from_pretrained(model, args.lora_weights)
     model.eval()
+    use_chat_template = (
+        (args.prompt_style == "chat")
+        or (args.prompt_style == "auto" and getattr(tokenizer, "chat_template", None))
+    )
+    print(f"[Prompt Style] use_chat_template={bool(use_chat_template)}")
 
     yes_ids = tokenizer.encode(" Yes", add_special_tokens=False)
     if len(yes_ids) == 0:
@@ -97,7 +103,31 @@ def main() -> None:
             sampled_negs = user_rng.sample(candidate_pool, args.neg_sample_size)
 
         candidates = [target] + sampled_negs
-        prompts = [_build_prompt(history, item, item_text, args.max_history) for item in candidates]
+        if use_chat_template:
+            prompts = []
+            for item in candidates:
+                hist = history[-args.max_history:]
+                hist_text = ", ".join(f'"{item_text.get(str(i), "Item_" + str(i))}"' for i in hist)
+                target_text = f'"{item_text.get(str(item), "Item_" + str(item))}"'
+                user_text = (
+                    "Given the user's preference history, identify whether the user will like the target item "
+                    "by answering \"Yes.\" or \"No.\".\n\n"
+                    f"User Preference History: {hist_text}\n"
+                    f"Will the user like target item {target_text}?"
+                )
+                messages = [
+                    {"role": "system", "content": "You are a helpful recommender assistant."},
+                    {"role": "user", "content": user_text},
+                ]
+                prompts.append(
+                    tokenizer.apply_chat_template(
+                        messages,
+                        tokenize=False,
+                        add_generation_prompt=True,
+                    )
+                )
+        else:
+            prompts = [_build_prompt_plain(history, item, item_text, args.max_history) for item in candidates]
 
         scores: List[float] = []
         for st in range(0, len(prompts), args.batch_size):
