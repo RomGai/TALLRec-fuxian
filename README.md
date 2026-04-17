@@ -44,3 +44,55 @@ Note that we will automatically detect all the different seed and sample files i
 Our project is developed based on the Alpaca_lora [repo](https://github.com/tloen/alpaca-lora), thanks for their contributions.
 
 For "Environment setting sharing for CUDA 12.0", please see [here](https://github.com/SAI990323/TALLRec/issues/46).
+
+## New pipeline for `new_data/*` format (train + ranking inference)
+
+This repo now includes a full pipeline for files like:
+- `new_data/Baby_Products_user_items_negs_train.csv`
+- `new_data/Baby_Products_user_items_negs_test.csv`
+
+### 1) Prepare train/valid/test files (with leakage checks)
+```bash
+python new_data/prepare_new_data.py \
+  --dataset Baby_Products \
+  --data-dir new_data \
+  --output-dir prepared_data \
+  --seed 42
+```
+
+This command will:
+- build `train.json` / `valid.json` for `finetune_rec.py`
+- build `test_users.jsonl` for ranking evaluation
+- verify train/test user overlap and remove overlaps from train (leakage guard)
+
+### 2) Train (backbone from Hugging Face directly)
+```bash
+python finetune_rec.py \
+  --base_model meta-llama/Llama-2-7b-hf \
+  --train_data_path prepared_data/Baby_Products/train.json \
+  --val_data_path prepared_data/Baby_Products/valid.json \
+  --output_dir outputs/baby_lora \
+  --batch_size 64 \
+  --micro_batch_size 4 \
+  --num_epochs 3 \
+  --learning_rate 1e-4 \
+  --logging_steps 1 \
+  --load_in_8bit True
+```
+
+### 3) Evaluate ranking with `1 target + 1000 random negatives`
+```bash
+python new_data/evaluate_ranking.py \
+  --base-model meta-llama/Llama-2-7b-hf \
+  --lora-weights outputs/baby_lora \
+  --prepared-dir prepared_data/Baby_Products \
+  --neg-sample-size 1000 \
+  --batch-size 32 \
+  --output outputs/baby_ranking_metrics.json
+```
+
+The evaluator reports:
+- HR@10 / HR@20 / HR@40
+- NDCG@10 / NDCG@20 / NDCG@40
+- target rank per user
+- running average metrics after each processed user
