@@ -34,6 +34,7 @@ def train(
     val_data_path: str = "",
     output_dir: str = "./lora-alpaca",
     sample: int = -1,
+    train_data_ratio: float = 1.0,
     seed: int = 0,
     # training hyperparams
     batch_size: int = 128,
@@ -69,6 +70,7 @@ def train(
         f"train_data_path: {train_data_path}\n"
         f"val_data_path: {val_data_path}\n"
         f"sample: {sample}\n"
+        f"train_data_ratio: {train_data_ratio}\n"
         f"seed: {seed}\n"
         f"output_dir: {output_dir}\n"
         f"batch_size: {batch_size}\n"
@@ -94,6 +96,8 @@ def train(
     assert (
         base_model
     ), "Please specify a --base_model, e.g. --base_model='decapoda-research/llama-7b-hf'"
+    if not (0 < train_data_ratio <= 1.0):
+        raise ValueError("--train_data_ratio must be in (0, 1].")
     gradient_accumulation_steps = batch_size // micro_batch_size
     # print(f"gradient_accumulation_steps: {gradient_accumulation_steps}")
 
@@ -283,9 +287,21 @@ def train(
     model.print_trainable_parameters()  # Be more transparent about the % of trainable params.
 
     print("[Step 5/8] Tokenizing training dataset")
-    train_data["train"] = train_data["train"].shuffle(seed=seed).select(range(sample)) if sample > -1 else train_data["train"].shuffle(seed=seed)
-    train_data["train"] = train_data["train"].shuffle(seed=seed)
-    train_data = (train_data["train"].map(generate_and_tokenize_prompt))
+    shuffled_train = train_data["train"].shuffle(seed=seed)
+    if sample > -1:
+        upper = min(sample, len(shuffled_train))
+        print(f"[Data Subset] Using fixed sample size: {upper}/{len(shuffled_train)}")
+        shuffled_train = shuffled_train.select(range(upper))
+
+    if train_data_ratio < 1.0:
+        ratio_count = max(1, int(len(shuffled_train) * train_data_ratio))
+        print(
+            f"[Data Subset] Applying train_data_ratio={train_data_ratio}, "
+            f"using {ratio_count}/{len(shuffled_train)} examples"
+        )
+        shuffled_train = shuffled_train.select(range(ratio_count))
+
+    train_data = shuffled_train.map(generate_and_tokenize_prompt)
     print("[Step 6/8] Tokenizing validation dataset")
     val_data = (val_data["train"].map(generate_and_tokenize_prompt))
     if not ddp and torch.cuda.device_count() > 1:
