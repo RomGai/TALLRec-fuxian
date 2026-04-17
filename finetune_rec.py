@@ -346,7 +346,7 @@ def train(
         metric_for_best_model="eval_auc",
         ddp_find_unused_parameters=False if ddp else None,
         group_by_length=group_by_length,
-        report_to=None,
+        report_to=[],
     )
     ta_sig = inspect.signature(transformers.TrainingArguments.__init__)
     if "evaluation_strategy" in ta_sig.parameters:
