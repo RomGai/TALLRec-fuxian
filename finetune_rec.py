@@ -1,5 +1,4 @@
 import os
-os.environ['LD_LIBRARY_PATH'] = '/data/baokq/miniconda3/envs/alpaca_lora/lib/'
 import sys
 from typing import List
 
@@ -23,7 +22,7 @@ from peft import (  # noqa: E402
     prepare_model_for_int8_training,
     set_peft_model_state_dict,
 )
-from transformers import LlamaForCausalLM, LlamaTokenizer  # noqa: F402
+from transformers import AutoModelForCausalLM, AutoTokenizer  # noqa: F402
 from sklearn.metrics import roc_auc_score
 
 def train(
@@ -57,6 +56,9 @@ def train(
     wandb_watch: str = "",  # options: false | gradients | all
     wandb_log_model: str = "",  # options: false | true
     resume_from_checkpoint: str = None,  # either training checkpoint or final adapter
+    load_in_8bit: bool = True,
+    logging_steps: int = 1,
+    prompt_style: str = "auto",  # auto | plain | chat
 
 ):
     print(
@@ -83,6 +85,9 @@ def train(
         f"wandb_watch: {wandb_watch}\n"
         f"wandb_log_model: {wandb_log_model}\n"
         f"resume_from_checkpoint: {resume_from_checkpoint}\n"
+        f"load_in_8bit: {load_in_8bit}\n"
+        f"logging_steps: {logging_steps}\n"
+        f"prompt_style: {prompt_style}\n"
     )
     assert (
         base_model
@@ -109,19 +114,47 @@ def train(
     if len(wandb_log_model) > 0:
         os.environ["WANDB_LOG_MODEL"] = wandb_log_model
 
-    model = LlamaForCausalLM.from_pretrained(
+    model = AutoModelForCausalLM.from_pretrained(
         base_model,
-        load_in_8bit=True,
+        load_in_8bit=load_in_8bit,
         torch_dtype=torch.float16,
         device_map=device_map,
     )
 
-    tokenizer = LlamaTokenizer.from_pretrained(base_model)
+    tokenizer = AutoTokenizer.from_pretrained(base_model, use_fast=True)
 
-    tokenizer.pad_token_id = (
-        0  # unk. we want this to be different from the eos token
-    )
+    if tokenizer.pad_token_id is None:
+        tokenizer.pad_token = tokenizer.eos_token
     tokenizer.padding_side = "left"  # Allow batched inference
+    yes_token_ids = tokenizer.encode(" Yes", add_special_tokens=False)
+    no_token_ids = tokenizer.encode(" No", add_special_tokens=False)
+    if len(yes_token_ids) == 0 or len(no_token_ids) == 0:
+        raise ValueError("Tokenizer cannot tokenize ' Yes' / ' No'.")
+    yes_token_id = yes_token_ids[0]
+    no_token_id = no_token_ids[0]
+    print(f"[Token IDs] yes_token_id={yes_token_id}, no_token_id={no_token_id}")
+
+    use_chat_template = (
+        (prompt_style == "chat")
+        or (prompt_style == "auto" and getattr(tokenizer, "chat_template", None))
+    )
+    print(f"[Prompt Style] use_chat_template={bool(use_chat_template)}")
+
+    def build_prompt(data_point, with_output=True):
+        if use_chat_template:
+            user_text = f"{data_point['instruction']}\n\n{data_point['input']}".strip()
+            messages = [
+                {"role": "system", "content": "You are a helpful recommender assistant."},
+                {"role": "user", "content": user_text},
+            ]
+            if with_output:
+                messages.append({"role": "assistant", "content": data_point["output"]})
+            return tokenizer.apply_chat_template(
+                messages,
+                tokenize=False,
+                add_generation_prompt=not with_output,
+            )
+        return generate_prompt(data_point if with_output else {**data_point, "output": ""})
 
     def tokenize(prompt, add_eos_token=True):
         # there's probably a way to do this with the tokenizer settings
@@ -146,10 +179,10 @@ def train(
         return result
 
     def generate_and_tokenize_prompt(data_point):
-        full_prompt = generate_prompt(data_point)
+        full_prompt = build_prompt(data_point, with_output=True)
         tokenized_full_prompt = tokenize(full_prompt)
         if not train_on_inputs:
-            user_prompt = generate_prompt({**data_point, "output": ""})
+            user_prompt = build_prompt(data_point, with_output=False)
             tokenized_user_prompt = tokenize(user_prompt, add_eos_token=False)
             user_prompt_len = len(tokenized_user_prompt["input_ids"])
 
@@ -160,7 +193,8 @@ def train(
             ]  # could be sped up, probably
         return tokenized_full_prompt
 
-    model = prepare_model_for_int8_training(model)
+    if load_in_8bit:
+        model = prepare_model_for_int8_training(model)
 
     config = LoraConfig(
         r=lora_r,
@@ -227,20 +261,30 @@ def train(
         Original Trainer may have a memory leak. 
         This is a workaround to avoid storing too many tensors that are not needed.
         """
-        labels_index = torch.argwhere(torch.bitwise_or(labels == 8241, labels == 3782))
-        gold = torch.where(labels[labels_index[:, 0], labels_index[:, 1]] == 3782, 0, 1)
+        labels_index = torch.argwhere(torch.bitwise_or(labels == yes_token_id, labels == no_token_id))
+        gold = torch.where(labels[labels_index[:, 0], labels_index[:, 1]] == no_token_id, 0, 1)
         labels_index[: , 1] = labels_index[: , 1] - 1
         logits = logits.softmax(dim=-1)
-        logits = torch.softmax(logits[labels_index[:, 0], labels_index[:, 1]][:,[3782, 8241]], dim = -1)
+        logits = torch.softmax(logits[labels_index[:, 0], labels_index[:, 1]][:, [no_token_id, yes_token_id]], dim=-1)
         return logits[:, 1][2::3], gold[2::3]
 
     os.environ["WANDB_DISABLED"] = "true"
     
     if sample > -1:
-        if sample <= 128 :
+        if sample <= 128:
             eval_step = 10
         else:
-            eval_step = sample / 128 * 5
+            eval_step = int(sample / 128 * 5)
+    else:
+        eval_step = 100
+
+    class VerboseStepCallback(transformers.TrainerCallback):
+        def on_log(self, args, state, control, logs=None, **kwargs):
+            if logs:
+                print(f"[Train Log] step={state.global_step} logs={logs}")
+
+        def on_evaluate(self, args, state, control, metrics=None, **kwargs):
+            print(f"[Eval] step={state.global_step} metrics={metrics}")
     
     trainer = transformers.Trainer(
         model=model,
@@ -253,7 +297,7 @@ def train(
             num_train_epochs=num_epochs,
             learning_rate=learning_rate,
             fp16=True,
-            logging_steps=8,
+            logging_steps=logging_steps,
             optim="adamw_torch",
             evaluation_strategy="steps",
             save_strategy="steps",
@@ -275,7 +319,7 @@ def train(
         ),
         compute_metrics=compute_metrics,
         preprocess_logits_for_metrics=preprocess_logits_for_metrics,
-        callbacks = [EarlyStoppingCallback(early_stopping_patience=10)]
+        callbacks=[EarlyStoppingCallback(early_stopping_patience=10), VerboseStepCallback()],
     )
     model.config.use_cache = False
 
