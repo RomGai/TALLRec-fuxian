@@ -8,6 +8,7 @@ import torch
 import transformers
 from datasets import load_dataset
 from transformers import EarlyStoppingCallback
+from transformers import BitsAndBytesConfig
 
 """
 Unused imports:
@@ -114,13 +115,35 @@ def train(
     if len(wandb_log_model) > 0:
         os.environ["WANDB_LOG_MODEL"] = wandb_log_model
 
-    model = AutoModelForCausalLM.from_pretrained(
-        base_model,
-        load_in_8bit=load_in_8bit,
-        torch_dtype=torch.float16,
-        device_map=device_map,
-    )
+    print("[Step 1/8] Loading backbone model")
+    model_load_kwargs = {
+        "torch_dtype": torch.float16 if torch.cuda.is_available() else torch.float32,
+        "device_map": device_map,
+    }
+    if load_in_8bit:
+        model_load_kwargs["quantization_config"] = BitsAndBytesConfig(load_in_8bit=True)
 
+    try:
+        model = AutoModelForCausalLM.from_pretrained(
+            base_model,
+            **model_load_kwargs,
+        )
+    except TypeError as e:
+        if load_in_8bit:
+            print(
+                "[Warning] 8-bit load failed due to Transformers/PEFT compatibility. "
+                "Retrying without 8-bit quantization.\n"
+                f"Original error: {e}"
+            )
+            model_load_kwargs.pop("quantization_config", None)
+            model = AutoModelForCausalLM.from_pretrained(
+                base_model,
+                **model_load_kwargs,
+            )
+        else:
+            raise
+
+    print("[Step 2/8] Loading tokenizer")
     tokenizer = AutoTokenizer.from_pretrained(base_model, use_fast=True)
 
     if tokenizer.pad_token_id is None:
@@ -193,7 +216,8 @@ def train(
             ]  # could be sped up, probably
         return tokenized_full_prompt
 
-    if load_in_8bit:
+    print("[Step 3/8] Preparing model for PEFT/LoRA")
+    if load_in_8bit and "quantization_config" in model_load_kwargs:
         model = prepare_model_for_kbit_training(model)
 
     config = LoraConfig(
@@ -208,6 +232,7 @@ def train(
 
     
 
+    print("[Step 4/8] Loading train/validation datasets")
     if train_data_path.endswith(".json"):  # todo: support jsonl
         train_data = load_dataset("json", data_files=train_data_path)
     else:
@@ -243,9 +268,11 @@ def train(
 
     model.print_trainable_parameters()  # Be more transparent about the % of trainable params.
 
+    print("[Step 5/8] Tokenizing training dataset")
     train_data["train"] = train_data["train"].shuffle(seed=seed).select(range(sample)) if sample > -1 else train_data["train"].shuffle(seed=seed)
     train_data["train"] = train_data["train"].shuffle(seed=seed)
     train_data = (train_data["train"].map(generate_and_tokenize_prompt))
+    print("[Step 6/8] Tokenizing validation dataset")
     val_data = (val_data["train"].map(generate_and_tokenize_prompt))
     if not ddp and torch.cuda.device_count() > 1:
         model.is_parallelizable = True
@@ -286,6 +313,7 @@ def train(
         def on_evaluate(self, args, state, control, metrics=None, **kwargs):
             print(f"[Eval] step={state.global_step} metrics={metrics}")
     
+    print("[Step 7/8] Building Trainer")
     trainer = transformers.Trainer(
         model=model,
         train_dataset=train_data,
@@ -333,9 +361,11 @@ def train(
     if torch.__version__ >= "2" and sys.platform != "win32":
         model = torch.compile(model)
 
+    print("[Step 8/8] Starting training loop")
     trainer.train(resume_from_checkpoint=resume_from_checkpoint)
 
     model.save_pretrained(output_dir)
+    print(f"[Done] Saved LoRA adapter to {output_dir}")
 
     print(
         "\n If there's a warning about missing keys above, please disregard :)"

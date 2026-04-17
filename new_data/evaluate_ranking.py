@@ -2,6 +2,7 @@ import argparse
 import json
 import math
 import random
+import time
 from pathlib import Path
 from typing import Dict, List
 
@@ -89,6 +90,7 @@ def main() -> None:
     ranks: List[int] = []
 
     print("[Step 3/5] Start per-user ranking evaluation")
+    tic = time.time()
     for user_idx, row in enumerate(test_rows, start=1):
         user_id = row["user_id"]
         history = row["history"]
@@ -156,8 +158,11 @@ def main() -> None:
         m10 = _running_metrics(ranks, 10)
         m20 = _running_metrics(ranks, 20)
         m40 = _running_metrics(ranks, 40)
+        progress = (user_idx / max(1, len(test_rows))) * 100
+        elapsed = time.time() - tic
         print(
-            f"[User Done] user_id={user_id} rank={rank} | "
+            f"[User Done] {user_idx}/{len(test_rows)} ({progress:.2f}%) "
+            f"user_id={user_id} rank={rank} elapsed={elapsed:.1f}s | "
             f"avg_HR@10={m10['hr']:.4f} avg_NDCG@10={m10['ndcg']:.4f} | "
             f"avg_HR@20={m20['hr']:.4f} avg_NDCG@20={m20['ndcg']:.4f} | "
             f"avg_HR@40={m40['hr']:.4f} avg_NDCG@40={m40['ndcg']:.4f}"
