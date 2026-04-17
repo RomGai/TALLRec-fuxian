@@ -19,7 +19,7 @@ from peft import (  # noqa: E402
     LoraConfig,
     get_peft_model,
     get_peft_model_state_dict,
-    prepare_model_for_int8_training,
+    prepare_model_for_kbit_training,
     set_peft_model_state_dict,
 )
 from transformers import AutoModelForCausalLM, AutoTokenizer  # noqa: F402
@@ -194,7 +194,7 @@ def train(
         return tokenized_full_prompt
 
     if load_in_8bit:
-        model = prepare_model_for_int8_training(model)
+        model = prepare_model_for_kbit_training(model)
 
     config = LoraConfig(
         r=lora_r,
